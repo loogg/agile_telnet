@@ -56,12 +56,12 @@ RT-Thread online packages
                   Version (latest)  --->
 ```
 
-**Set agile_telnet thread stack size**：`agile_telnet`线程堆栈大小
-**Set agile_telnet thread priority**：`agile_telnet`线程优先级
-**Set agile_telnet listen port**：`agile_telnet`监听端口号
-**Set agile_telnet rx buffer size**：`agile_telnet`接收环形缓冲区大小
-**Set agile_telnet tx buffer size**：`agile_telnet`发送环形缓冲区大小
-**Set agile_telnet client timeout(min)**：`agile_telnet`客户端默认超时时间(3分钟)
+- **Set agile_telnet thread stack size**：`agile_telnet`线程堆栈大小
+- **Set agile_telnet thread priority**：`agile_telnet`线程优先级
+- **Set agile_telnet listen port**：`agile_telnet`监听端口号
+- **Set agile_telnet rx buffer size**：`agile_telnet`接收环形缓冲区大小
+- **Set agile_telnet tx buffer size**：`agile_telnet`发送环形缓冲区大小
+- **Set agile_telnet client timeout(min)**：`agile_telnet`客户端默认超时时间(3分钟)
 
 然后让 RT-Thread 的包管理器自动更新，或者使用 `pkgs --update` 命令更新包到 BSP 中。
 
