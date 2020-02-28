@@ -18,8 +18,16 @@
 #include <sys/time.h>
 #include <sys/socket.h>
 #include <sys/select.h>
+
+#ifdef RT_USING_FINSH
+
+#ifdef FINSH_USING_MSH
 #include <msh.h>
+#endif /* FINSH_USING_MSH */
+
 #include <shell.h>
+
+#endif /* RT_USING_FINSH */
 
 /* 线程堆栈大小 */
 #ifndef PKG_AGILE_TELNET_THREAD_STACK_SIZE
@@ -242,10 +250,13 @@ _telnet_start:
                     rt_hw_interrupt_enable(level);
 
                     telnet.isconnected = 1;
+                
+                #ifdef RT_USING_FINSH
                 #ifdef FINSH_USING_MSH
                     msh_exec("version", strlen("version"));
-                #endif
+                #endif /* FINSH_USING_MSH */
                     rt_kprintf(FINSH_PROMPT);
+                #endif /* RT_USING_FINSH */
                 }
             }
 
@@ -385,6 +396,8 @@ static int telnet_module_init(void)
 }
 INIT_ENV_EXPORT(telnet_module_init);
 
+#ifdef RT_USING_FINSH
+#ifdef FINSH_USING_MSH
 static int telnet_client_timeout(int argc, char **argv)
 {
     if(argc == 1)
@@ -414,5 +427,7 @@ static int telnet_client_timeout(int argc, char **argv)
     return RT_EOK;
 }
 MSH_CMD_EXPORT_ALIAS(telnet_client_timeout, telnet_ctm, telnet client teimeout);
+#endif /* FINSH_USING_MSH */
+#endif /* RT_USING_FINSH */
 
 #endif /* PKG_USING_AGILE_TELNET */
