@@ -7,27 +7,29 @@
     Date:         2020-02-27
     Author:       Longwei Ma
     Modification: 新建版本
+
+ 2. Version:      v2.0.0
+    Date:         2020-08-02
+    Author:       Longwei Ma
+    Modification: 将agile_telnet作为agile_console的一个插件
 *************************************************/
 
 #include <rthw.h>
 
 #ifdef PKG_USING_AGILE_TELNET
 
+#ifndef PKG_USING_AGILE_CONSOLE
+#error "Please enable agile_console package"
+#endif
+
 #include <agile_telnet.h>
+#include <agile_console.h>
+
 #include <dfs_posix.h>
 #include <sys/time.h>
 #include <sys/socket.h>
 #include <sys/select.h>
 
-#ifdef RT_USING_FINSH
-
-#ifdef FINSH_USING_MSH
-#include <msh.h>
-#endif /* FINSH_USING_MSH */
-
-#include <shell.h>
-
-#endif /* RT_USING_FINSH */
 
 /* 线程堆栈大小 */
 #ifndef PKG_AGILE_TELNET_THREAD_STACK_SIZE
@@ -59,64 +61,10 @@
 #define PKG_AGILE_TELNET_CLIENT_DEFAULT_TIMEOUT     3
 #endif
 
-static struct telnet_session telnet = {0};
+static struct agile_telnet telnet = {0};
+static struct agile_console_backend telnet_backend = {0};
 
-/* RT-Thread Device Driver Interface */
-static rt_err_t telnet_init(rt_device_t dev)
-{
-    return RT_EOK;
-}
-
-static rt_err_t telnet_open(rt_device_t dev, rt_uint16_t oflag)
-{
-    return RT_EOK;
-}
-
-static rt_err_t telnet_close(rt_device_t dev)
-{
-    return RT_EOK;
-}
-
-static rt_size_t telnet_read(rt_device_t dev, rt_off_t pos, void* buffer, rt_size_t size)
-{
-    rt_size_t result = 0;
-
-    do
-    {
-        rt_mutex_take(telnet.rx_ringbuffer_lock, RT_WAITING_FOREVER);
-        result = rt_ringbuffer_get(&(telnet.rx_ringbuffer), buffer, size);
-        rt_mutex_release(telnet.rx_ringbuffer_lock);
-
-        if(result == 0)
-        {
-            rt_sem_take(telnet.read_notice, RT_WAITING_FOREVER);
-        }
-    } while (result == 0);
-
-    return result;
-}
-
-static rt_size_t telnet_write(rt_device_t dev, rt_off_t pos, const void* buffer, rt_size_t size)
-{
-    if(telnet.isconnected == 0)
-        return size;
-    
-    if(size > 0)
-    {
-        rt_base_t level = rt_hw_interrupt_disable();
-        rt_ringbuffer_put(&telnet.tx_ringbuffer, buffer, size);
-        rt_hw_interrupt_enable(level);
-    }
-
-    return size;
-}
-
-static rt_err_t telnet_control(rt_device_t dev, int cmd, void *args)
-{
-    return RT_EOK;
-}
-
-static int process_tx(struct telnet_session* telnet)
+static int process_tx(void)
 {
     rt_size_t length = 0;
     rt_uint8_t tx_buffer[100];
@@ -125,13 +73,13 @@ static int process_tx(struct telnet_session* telnet)
     while(1)
     {
         rt_base_t level = rt_hw_interrupt_disable();
-        length = rt_ringbuffer_get(&(telnet->tx_ringbuffer), tx_buffer, sizeof(tx_buffer));
+        length = rt_ringbuffer_get(telnet.tx_rb, tx_buffer, sizeof(tx_buffer));
         rt_hw_interrupt_enable(level);
 
         if(length > 0)
         {
             tx_len += length;
-            send(telnet->client_fd, tx_buffer, length, 0);
+            send(telnet.client_fd, tx_buffer, length, 0);
         }
         else
         {
@@ -142,20 +90,20 @@ static int process_tx(struct telnet_session* telnet)
     return tx_len;
 }
 
-static void process_rx(struct telnet_session *telnet, rt_uint8_t *data, rt_size_t length)
+static void process_rx(rt_uint8_t *data, rt_size_t length)
 {
-    rt_mutex_take(telnet->rx_ringbuffer_lock, RT_WAITING_FOREVER);
+    rt_base_t level = rt_hw_interrupt_disable();
     while(length)
     {
         if(*data != '\r') /* ignore '\r' */
         {
-            rt_ringbuffer_putchar(&(telnet->rx_ringbuffer), *data);
+            rt_ringbuffer_putchar(telnet.rx_rb, *data);
         }
 
         data++;
         length--;
     }
-    rt_mutex_release(telnet->rx_ringbuffer_lock);
+    rt_hw_interrupt_enable(level);
 }
 
 /* telnet server thread entry */
@@ -246,17 +194,13 @@ _telnet_start:
                     client_tick_timeout = rt_tick_get() + rt_tick_from_millisecond(telnet.client_timeout * 60000);
 
                     rt_base_t level = rt_hw_interrupt_disable();
-                    rt_ringbuffer_reset(&(telnet.tx_ringbuffer));
+                    rt_ringbuffer_reset(telnet.tx_rb);
                     rt_hw_interrupt_enable(level);
 
                     telnet.isconnected = 1;
-                
-                #ifdef RT_USING_FINSH
-                #ifdef FINSH_USING_MSH
-                    msh_exec("version", strlen("version"));
-                #endif /* FINSH_USING_MSH */
-                    rt_kprintf(FINSH_PROMPT);
-                #endif /* RT_USING_FINSH */
+
+                    const char *format = "Login Successful.\r\n";
+                    send(telnet.client_fd, format, strlen(format), 0);
                 }
             }
 
@@ -280,15 +224,14 @@ _telnet_start:
                     }
                     else
                     {
-                        process_rx(&telnet, recv_buf, recv_len);
-                        rt_sem_release(telnet.read_notice);
+                        process_rx(recv_buf, recv_len);
 
                         client_tick_timeout = rt_tick_get() + rt_tick_from_millisecond(telnet.client_timeout * 60000);
                     }
                 }
                 else if(FD_ISSET(telnet.client_fd, &writeset))
                 {
-                    int send_len = process_tx(&telnet);
+                    int send_len = process_tx();
                     if(send_len > 0)
                     {
                         client_tick_timeout = rt_tick_get() + rt_tick_from_millisecond(telnet.client_timeout * 60000);
@@ -328,73 +271,71 @@ _telnet_restart:
 
 }
 
-#ifdef RT_USING_DEVICE_OPS
-    static struct rt_device_ops _ops = {
-        telnet_init,
-        telnet_open,
-        telnet_close,
-        telnet_read,
-        telnet_write,
-        telnet_control
-    };
-#endif
 
-static int telnet_device_register(void)
+
+static void telnet_backend_output(const uint8_t *buf, int len)
 {
-    rt_memset(&telnet, 0, sizeof(struct telnet_session));
+    if(telnet.isconnected == 0)
+        return;
 
-    /* register telnet device */
-    telnet.device.type = RT_Device_Class_Char;
-#ifdef RT_USING_DEVICE_OPS
-    telnet.device.ops = &_ops;
-#else
-    telnet.device.init = telnet_init;
-    telnet.device.open = telnet_open;
-    telnet.device.close = telnet_close;
-    telnet.device.read = telnet_read;
-    telnet.device.write = telnet_write;
-    telnet.device.control = telnet_control;
-#endif
+    rt_base_t level = rt_hw_interrupt_disable();
 
-    /* no private */
-    telnet.device.user_data = RT_NULL;
+    while(len > 0)
+    {
+        if(*buf == '\n')
+            rt_ringbuffer_putchar(telnet.tx_rb, '\r');
 
-    /* register telnet device */
-    rt_device_register(&telnet.device, "telnet", RT_DEVICE_FLAG_RDWR | RT_DEVICE_FLAG_STREAM);
+        rt_ringbuffer_putchar(telnet.tx_rb, *buf);
+
+        ++buf;
+        --len;
+    }
+
+    rt_hw_interrupt_enable(level);
+}
+
+static int telnet_backend_read(uint8_t *buf, int len)
+{
+    if(telnet.isconnected == 0)
+        return 0;
+
+    rt_size_t result = 0;
+
+    rt_base_t level = rt_hw_interrupt_disable();
+    result = rt_ringbuffer_get(telnet.rx_rb, buf, len);
+    rt_hw_interrupt_enable(level);
+
+    return result;
+}
+
+static int agile_telnet_init(void)
+{
+    rt_memset(&telnet, 0, sizeof(struct agile_telnet));
 
     telnet.isconnected = 0;
     telnet.server_fd = -1;
     telnet.client_fd = -1;
     telnet.client_timeout = PKG_AGILE_TELNET_CLIENT_DEFAULT_TIMEOUT;
 
-    rt_console_set_device("telnet");
-    return RT_EOK;
-}
-INIT_BOARD_EXPORT(telnet_device_register);
+    telnet.rx_rb = rt_ringbuffer_create(PKG_AGILE_TELNET_RX_BUFFER_SIZE);
+    RT_ASSERT(telnet.rx_rb != RT_NULL);
 
-static int telnet_module_init(void)
-{
-    rt_uint8_t *ptr = rt_malloc(PKG_AGILE_TELNET_RX_BUFFER_SIZE);
-    RT_ASSERT(ptr != RT_NULL);
-    rt_ringbuffer_init(&telnet.rx_ringbuffer, ptr, PKG_AGILE_TELNET_RX_BUFFER_SIZE);
+    telnet.tx_rb = rt_ringbuffer_create(PKG_AGILE_TELNET_TX_BUFFER_SIZE);
+    RT_ASSERT(telnet.tx_rb != RT_NULL);
 
-    telnet.rx_ringbuffer_lock = rt_mutex_create("telnet_rx", RT_IPC_FLAG_FIFO);
-    RT_ASSERT(telnet.rx_ringbuffer_lock != RT_NULL);
-
-    ptr = rt_malloc(PKG_AGILE_TELNET_TX_BUFFER_SIZE);
-    RT_ASSERT(ptr != RT_NULL);
-    rt_ringbuffer_init(&telnet.tx_ringbuffer, ptr, PKG_AGILE_TELNET_TX_BUFFER_SIZE);
-
-    telnet.read_notice = rt_sem_create("telnet_rx", 0, RT_IPC_FLAG_FIFO);
-    RT_ASSERT(telnet.read_notice != RT_NULL);
-
-    rt_thread_t tid = rt_thread_create("telnet", telnet_thread, RT_NULL, PKG_AGILE_TELNET_THREAD_STACK_SIZE, PKG_AGILE_TELNET_THREAD_PRIORITY, 100);
+    rt_thread_t tid = rt_thread_create("telnet", telnet_thread, RT_NULL, PKG_AGILE_TELNET_THREAD_STACK_SIZE, 
+                                       PKG_AGILE_TELNET_THREAD_PRIORITY, 100);
     RT_ASSERT(tid != RT_NULL);
     rt_thread_startup(tid);
 
+    telnet_backend.output = telnet_backend_output;
+    telnet_backend.read = telnet_backend_read;
+
+    agile_console_backend_register(&telnet_backend);
+
     return RT_EOK;
 }
-INIT_ENV_EXPORT(telnet_module_init);
+INIT_ENV_EXPORT(agile_telnet_init);
 
 #ifdef RT_USING_FINSH
 #ifdef FINSH_USING_MSH
