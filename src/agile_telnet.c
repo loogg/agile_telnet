@@ -112,6 +112,7 @@ static void telnet_thread(void* parameter)
 #define RECV_BUF_LEN 64
 
     struct sockaddr_in addr;
+    int enable = 1;
     socklen_t addr_size;
     rt_uint8_t recv_buf[RECV_BUF_LEN];
     int max_fd = -1;
@@ -131,6 +132,9 @@ static void telnet_thread(void* parameter)
     rt_thread_mdelay(5000);
 _telnet_start:
     if ((telnet.server_fd = socket(AF_INET, SOCK_STREAM, 0)) < 0)
+        goto _telnet_restart;
+
+    if(setsockopt(telnet.server_fd, SOL_SOCKET, SO_REUSEADDR, (const void *)&enable, sizeof(enable)) < 0)
         goto _telnet_restart;
 
     addr.sin_family = AF_INET;
