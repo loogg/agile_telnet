@@ -10,9 +10,11 @@ extern "C" {
 struct agile_telnet
 {
     uint8_t isconnected;
-    rt_int32_t server_fd;
-    rt_int32_t client_fd;
+    int server_fd;
+    int client_fd;
     int client_timeout;
+    rt_device_t tlnt_dev;
+    int tx_fd;
 
     struct rt_ringbuffer *rx_rb;
     struct rt_ringbuffer *tx_rb;

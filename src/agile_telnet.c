@@ -12,6 +12,11 @@
     Date:         2020-08-02
     Author:       Longwei Ma
     Modification: 将agile_telnet作为agile_console的一个插件
+
+ 3. Version:      v2.0.1
+    Date:         2021-04-07
+    Author:       Longwei Ma
+    Modification: 将telnet的tx_rb做成devfs，使用select监听是否有数据
 *************************************************/
 
 #include <rthw.h>
@@ -26,6 +31,7 @@
 #include <agile_console.h>
 
 #include <dfs_posix.h>
+#include <dfs_poll.h>
 #include <sys/time.h>
 #include <sys/socket.h>
 #include <sys/select.h>
@@ -64,46 +70,34 @@
 static struct agile_telnet telnet = {0};
 static struct agile_console_backend telnet_backend = {0};
 
-static int process_tx(void)
+RT_WEAK rt_size_t rt_ringbuffer_peak(struct rt_ringbuffer *rb, rt_uint8_t **ptr)
 {
-    rt_size_t length = 0;
-    rt_uint8_t tx_buffer[100];
-    rt_size_t tx_len = 0;
+    RT_ASSERT(rb != RT_NULL);
 
-    while(1)
+    *ptr = RT_NULL;
+
+    /* whether has enough data  */
+    rt_size_t size = rt_ringbuffer_data_len(rb);
+
+    /* no data */
+    if (size == 0)
+        return 0;
+
+    *ptr = &rb->buffer_ptr[rb->read_index];
+
+    if(rb->buffer_size - rb->read_index > size)
     {
-        rt_base_t level = rt_hw_interrupt_disable();
-        length = rt_ringbuffer_get(telnet.tx_rb, tx_buffer, sizeof(tx_buffer));
-        rt_hw_interrupt_enable(level);
-
-        if(length > 0)
-        {
-            tx_len += length;
-            send(telnet.client_fd, tx_buffer, length, 0);
-        }
-        else
-        {
-            break;
-        }
+        rb->read_index += size;
+        return size;
     }
 
-    return tx_len;
-}
+    size = rb->buffer_size - rb->read_index;
 
-static void process_rx(rt_uint8_t *data, rt_size_t length)
-{
-    rt_base_t level = rt_hw_interrupt_disable();
-    while(length)
-    {
-        if(*data != '\r') /* ignore '\r' */
-        {
-            rt_ringbuffer_putchar(telnet.rx_rb, *data);
-        }
+    /* we are going into the other side of the mirror */
+    rb->read_mirror = ~rb->read_mirror;
+    rb->read_index = 0;
 
-        data++;
-        length--;
-    }
-    rt_hw_interrupt_enable(level);
+    return size;
 }
 
 /* telnet server thread entry */
@@ -111,101 +105,111 @@ static void telnet_thread(void* parameter)
 {
 #define RECV_BUF_LEN 64
 
-    struct sockaddr_in addr;
     int enable = 1;
-    socklen_t addr_size;
+    int flags;
+    struct sockaddr_in addr;
     rt_uint8_t recv_buf[RECV_BUF_LEN];
-    int max_fd = -1;
-    fd_set readset, writeset, exceptset;
     rt_tick_t client_tick_timeout = rt_tick_get();
-    int rc;
+
+    // select使用
+    fd_set readset, exceptset;
     // select超时时间
     struct timeval select_timeout;
     select_timeout.tv_sec = 10;
     select_timeout.tv_usec = 0;
 
-    telnet.server_fd = -1;
-    telnet.client_fd = -1;
-    telnet.isconnected = 0;
-    telnet.client_timeout = PKG_AGILE_TELNET_CLIENT_DEFAULT_TIMEOUT;
-
     rt_thread_mdelay(5000);
 _telnet_start:
-    if ((telnet.server_fd = socket(AF_INET, SOCK_STREAM, 0)) < 0)
+    telnet.server_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if(telnet.server_fd < 0)
         goto _telnet_restart;
 
     if(setsockopt(telnet.server_fd, SOL_SOCKET, SO_REUSEADDR, (const void *)&enable, sizeof(enable)) < 0)
         goto _telnet_restart;
 
+    rt_memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_port = htons(PKG_AGILE_TELNET_PORT);
     addr.sin_addr.s_addr = INADDR_ANY;
-    rt_memset(&(addr.sin_zero), 0, sizeof(addr.sin_zero));
-    if (bind(telnet.server_fd, (struct sockaddr *) &addr, sizeof(struct sockaddr)) < 0)
+    if(bind(telnet.server_fd, (struct sockaddr *) &addr, sizeof(addr)) < 0)
         goto _telnet_restart;
 
-    if (listen(telnet.server_fd, 1) < 0)
+    if(listen(telnet.server_fd, 1) < 0)
         goto _telnet_restart;
+    
+    flags = fcntl(telnet.server_fd, F_GETFL, 0);
+    flags |= O_NONBLOCK;
+    fcntl(telnet.server_fd, F_SETFL, flags);
 
     while (1)
     {
         FD_ZERO(&readset);
-        FD_ZERO(&writeset);
         FD_ZERO(&exceptset);
 
         FD_SET(telnet.server_fd, &readset);
         FD_SET(telnet.server_fd, &exceptset);
 
-        max_fd = telnet.server_fd;
+        int max_fd = telnet.server_fd;
         if(telnet.client_fd >= 0)
         {
             FD_SET(telnet.client_fd, &readset);
-            FD_SET(telnet.client_fd, &writeset);
             FD_SET(telnet.client_fd, &exceptset);
+           
             if(max_fd < telnet.client_fd)
                 max_fd = telnet.client_fd;
         }
+        if(telnet.isconnected)
+        {
+             FD_SET(telnet.tx_fd, &readset);
 
-        rc = select(max_fd + 1, &readset, &writeset, &exceptset, &select_timeout);
+             if(max_fd < telnet.tx_fd)
+                max_fd = telnet.tx_fd;
+        }
+
+        int rc = select(max_fd + 1, &readset, RT_NULL, &exceptset, &select_timeout);
         if(rc < 0)
-            goto _telnet_restart;
-        else if(rc > 0)
+            break;
+        if(rc > 0)
         {
             //服务器事件
             if(FD_ISSET(telnet.server_fd, &exceptset))
-                goto _telnet_restart;
+                break;
 
             if(FD_ISSET(telnet.server_fd, &readset))
             {
-                int client_sock_fd = accept(telnet.server_fd, (struct sockaddr *)&addr, &addr_size);
-                if(client_sock_fd < 0)
-                    goto _telnet_restart;
-                else
+                socklen_t addrlen = sizeof(struct sockaddr_in);
+                int new_s = accept(telnet.server_fd, (struct sockaddr *)&addr, &addrlen);
+                if(new_s < 0)
+                    break;
+
+                if (telnet.client_fd >= 0)
                 {
-                    if(telnet.client_fd >= 0)
-                    {
-                        telnet.isconnected = 0;
-                        close(telnet.client_fd);
-                        telnet.client_fd = -1;
-                    }
-
-                    struct timeval tv;
-                    tv.tv_sec = 20;
-                    tv.tv_usec = 0;
-                    setsockopt(client_sock_fd, SOL_SOCKET, SO_SNDTIMEO, (char *)&tv, sizeof(struct timeval));
-                    telnet.client_fd = client_sock_fd;
-                    telnet.client_timeout = PKG_AGILE_TELNET_CLIENT_DEFAULT_TIMEOUT;
-                    client_tick_timeout = rt_tick_get() + rt_tick_from_millisecond(telnet.client_timeout * 60000);
-
-                    rt_base_t level = rt_hw_interrupt_disable();
-                    rt_ringbuffer_reset(telnet.tx_rb);
-                    rt_hw_interrupt_enable(level);
-
-                    telnet.isconnected = 1;
-
-                    const char *format = "Login Successful.\r\n";
-                    send(telnet.client_fd, format, strlen(format), 0);
+                    telnet.isconnected = 0;
+                    close(telnet.client_fd);
+                    telnet.client_fd = -1;
                 }
+
+                int option = 1;
+                setsockopt(new_s, IPPROTO_TCP, TCP_NODELAY, (const void *)&option, sizeof(int));
+                struct timeval tv;
+                tv.tv_sec = 5;
+                tv.tv_usec = 0;
+                setsockopt(new_s, SOL_SOCKET, SO_SNDTIMEO, (const void *)&tv, sizeof(struct timeval));
+
+                telnet.client_fd = new_s;
+                telnet.client_timeout = PKG_AGILE_TELNET_CLIENT_DEFAULT_TIMEOUT;
+                client_tick_timeout = rt_tick_get() + rt_tick_from_millisecond(telnet.client_timeout * 60000);
+
+                rt_base_t level = rt_hw_interrupt_disable();
+                rt_ringbuffer_reset(telnet.tx_rb);
+                rt_hw_interrupt_enable(level);
+
+                telnet.isconnected = 1;
+
+                const char *format = "Login Successful.\r\n";
+                send(telnet.client_fd, format, strlen(format), 0);
+
+                continue;
             }
 
             // 客户端事件
@@ -228,20 +232,26 @@ _telnet_start:
                     }
                     else
                     {
-                        process_rx(recv_buf, recv_len);
+                        rt_base_t level = rt_hw_interrupt_disable();
+                        rt_ringbuffer_put(telnet.rx_rb, recv_buf, recv_len);
+                        rt_hw_interrupt_enable(level);
 
                         client_tick_timeout = rt_tick_get() + rt_tick_from_millisecond(telnet.client_timeout * 60000);
                     }
                 }
-                else if(FD_ISSET(telnet.client_fd, &writeset))
+            }
+
+            if(telnet.isconnected && FD_ISSET(telnet.tx_fd, &readset))
+            {
+                rt_uint8_t *send_ptr = RT_NULL;
+                rt_base_t level = rt_hw_interrupt_disable();
+                int send_len = rt_ringbuffer_peak(telnet.tx_rb, &send_ptr);
+                rt_hw_interrupt_enable(level);
+
+                if(send_len > 0)
                 {
-                    int send_len = process_tx();
-                    if(send_len > 0)
-                    {
-                        client_tick_timeout = rt_tick_get() + rt_tick_from_millisecond(telnet.client_timeout * 60000);
-                    }
-                    else  
-                        rt_thread_mdelay(50);
+                    send(telnet.client_fd, send_ptr, send_len, 0);
+                    client_tick_timeout = rt_tick_get() + rt_tick_from_millisecond(telnet.client_timeout * 60000);
                 }
             }
         }
@@ -272,10 +282,7 @@ _telnet_restart:
 
     rt_thread_mdelay(10000);
     goto _telnet_start;
-
 }
-
-
 
 static void telnet_backend_output(const uint8_t *buf, int len)
 {
@@ -283,19 +290,11 @@ static void telnet_backend_output(const uint8_t *buf, int len)
         return;
 
     rt_base_t level = rt_hw_interrupt_disable();
-
-    while(len > 0)
-    {
-        if(*buf == '\n')
-            rt_ringbuffer_putchar(telnet.tx_rb, '\r');
-
-        rt_ringbuffer_putchar(telnet.tx_rb, *buf);
-
-        ++buf;
-        --len;
-    }
-
+    int put_len = rt_ringbuffer_put(telnet.tx_rb, buf, len);
     rt_hw_interrupt_enable(level);
+
+    if(put_len > 0)
+        rt_wqueue_wakeup(&(telnet.tlnt_dev->wait_queue), (void*)POLLIN);
 }
 
 static int telnet_backend_read(uint8_t *buf, int len)
@@ -312,20 +311,65 @@ static int telnet_backend_read(uint8_t *buf, int len)
     return result;
 }
 
+static int tlnt_fops_open(struct dfs_fd *fd)
+{
+    rt_device_t device = (rt_device_t)fd->data;
+    RT_ASSERT(device != RT_NULL);
+
+    device->ref_count++;
+
+    return 0;
+}
+
+static int tlnt_fops_poll(struct dfs_fd *fd, rt_pollreq_t *req)
+{
+    int mask = 0;
+    rt_device_t device = (rt_device_t)fd->data;
+    RT_ASSERT(device != RT_NULL);
+
+    rt_poll_add(&(device->wait_queue), req);
+
+    if(rt_ringbuffer_data_len(telnet.tx_rb) != 0)
+        mask |= POLLIN;
+    
+    return mask;
+}
+
+static const struct dfs_file_ops tlnt_fops =
+{
+    tlnt_fops_open,
+    RT_NULL,
+    RT_NULL,
+    RT_NULL,
+    RT_NULL,
+    RT_NULL,
+    RT_NULL,
+    RT_NULL,
+    tlnt_fops_poll,
+};
+
 static int agile_telnet_init(void)
 {
-    rt_memset(&telnet, 0, sizeof(struct agile_telnet));
-
     telnet.isconnected = 0;
     telnet.server_fd = -1;
     telnet.client_fd = -1;
     telnet.client_timeout = PKG_AGILE_TELNET_CLIENT_DEFAULT_TIMEOUT;
+    telnet.tx_fd = -1;
 
     telnet.rx_rb = rt_ringbuffer_create(PKG_AGILE_TELNET_RX_BUFFER_SIZE);
     RT_ASSERT(telnet.rx_rb != RT_NULL);
 
     telnet.tx_rb = rt_ringbuffer_create(PKG_AGILE_TELNET_TX_BUFFER_SIZE);
     RT_ASSERT(telnet.tx_rb != RT_NULL);
+
+    telnet.tlnt_dev = rt_malloc(sizeof(struct rt_device));
+    rt_memset(telnet.tlnt_dev, 0, sizeof(struct rt_device));
+    telnet.tlnt_dev->type = RT_Device_Class_Miscellaneous;
+    rt_device_register(telnet.tlnt_dev, "tlnt", RT_DEVICE_FLAG_RDWR);
+    telnet.tlnt_dev->fops = &tlnt_fops;
+
+    telnet.tx_fd = open("/dev/tlnt", O_RDWR, 0);
+    RT_ASSERT(telnet.tx_fd >= 0);
 
     rt_thread_t tid = rt_thread_create("telnet", telnet_thread, RT_NULL, PKG_AGILE_TELNET_THREAD_STACK_SIZE, 
                                        PKG_AGILE_TELNET_THREAD_PRIORITY, 100);
