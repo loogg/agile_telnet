@@ -236,6 +236,8 @@ _telnet_start:
                         rt_ringbuffer_put(telnet.rx_rb, recv_buf, recv_len);
                         rt_hw_interrupt_enable(level);
 
+                        agile_console_wakeup();
+
                         client_tick_timeout = rt_tick_get() + rt_tick_from_millisecond(telnet.client_timeout * 60000);
                     }
                 }
@@ -415,7 +417,7 @@ static int telnet_client_timeout(int argc, char **argv)
   
     return RT_EOK;
 }
-MSH_CMD_EXPORT_ALIAS(telnet_client_timeout, telnet_ctm, telnet client teimeout);
+MSH_CMD_EXPORT_ALIAS(telnet_client_timeout, telnet_ctm, telnet client timeout);
 #endif /* FINSH_USING_MSH */
 #endif /* RT_USING_FINSH */
 
