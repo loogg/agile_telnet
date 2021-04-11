@@ -18,7 +18,7 @@
     Author:       Longwei Ma
     Modification: 将telnet的tx_rb做成devfs，使用select监听是否有数据
 
- 3. Version:      v2.0.2
+ 4. Version:      v2.0.2
     Date:         2021-04-10
     Author:       Longwei Ma
     Modification: 使用 agile_console_wakeup
