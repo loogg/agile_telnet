@@ -17,6 +17,12 @@
     Date:         2021-04-07
     Author:       Longwei Ma
     Modification: 将telnet的tx_rb做成devfs，使用select监听是否有数据
+
+ 3. Version:      v2.0.2
+    Date:         2021-04-10
+    Author:       Longwei Ma
+    Modification: 使用 agile_console_wakeup
+                  增加登录验证用户功能
 *************************************************/
 
 #include <rthw.h>
@@ -67,6 +73,16 @@
 #define PKG_AGILE_TELNET_CLIENT_DEFAULT_TIMEOUT     3
 #endif
 
+/* 登录验证 */
+#ifdef PKG_AGILE_TELNET_USING_AUTH
+#ifndef PKG_AGILE_TELNET_USERNAME
+#define PKG_AGILE_TELNET_USERNAME                   "loogg"
+#endif
+#ifndef PKG_AGILE_TELNET_PASSWORD
+#define PKG_AGILE_TELNET_PASSWORD                   "loogg"
+#endif
+#endif
+
 static struct agile_telnet telnet = {0};
 static struct agile_console_backend telnet_backend = {0};
 
@@ -99,6 +115,102 @@ RT_WEAK rt_size_t rt_ringbuffer_peak(struct rt_ringbuffer *rb, rt_uint8_t **ptr)
 
     return size;
 }
+
+#ifdef PKG_AGILE_TELNET_USING_AUTH
+static void telnet_client_process(rt_uint8_t *recv_buf, int recv_len)
+{
+    static rt_uint16_t index = 0;
+
+    switch(telnet.state)
+    {
+        case AGILE_TELNET_STATE_USER:
+        {
+            if(telnet.username[0] == '\0')
+                index = 0;
+
+            rt_uint8_t change = 0;
+            for (int i = 0; i < recv_len; i++)
+            {
+                if(recv_buf[i] == '\r')
+                {
+                    change = 1;
+                    break;
+                }
+
+                if(index == sizeof(telnet.username) - 1)
+                    break;
+                telnet.username[index++] = recv_buf[i];
+            }
+
+            if(change)
+            {
+                index = 0;
+                telnet.state = AGILE_TELNET_STATE_PASSWORD;
+                const char *format = "\r\npassword:";
+                send(telnet.client_fd, format, strlen(format), 0);
+            }
+        }
+        break;
+
+        case AGILE_TELNET_STATE_PASSWORD:
+        {
+            rt_uint8_t change = 0;
+            for (int i = 0; i < recv_len; i++)
+            {
+                if(recv_buf[i] == '\r')
+                {
+                    change = 1;
+                    break;
+                }
+
+                if(index == sizeof(telnet.password) - 1)
+                    break;
+                telnet.password[index++] = recv_buf[i];
+            }
+
+            if(change)
+            {
+                int result = -RT_ERROR;
+                do
+                {
+                    if(rt_strcmp(telnet.username, PKG_AGILE_TELNET_USERNAME))
+                        break;
+                    if(rt_strcmp(telnet.password, PKG_AGILE_TELNET_PASSWORD))
+                        break;
+
+                    result = RT_EOK;
+                }while(0);
+
+                if(result != RT_EOK)
+                {
+                    telnet.state = AGILE_TELNET_STATE_USER;
+                    rt_memset(telnet.username, 0, sizeof(telnet.username));
+                    rt_memset(telnet.password, 0, sizeof(telnet.password));
+
+                    const char *format = "\r\nAuth failed!\r\n\r\nusername:";
+                    send(telnet.client_fd, format, strlen(format), 0);
+                }
+                else
+                {
+                    telnet.state = AGILE_TELNET_STATE_PROCESS;
+                    rt_base_t level = rt_hw_interrupt_disable();
+                    rt_ringbuffer_reset(telnet.tx_rb);
+                    rt_hw_interrupt_enable(level);
+
+                    telnet.isconnected = 1;
+
+                    const char *format = "\r\nLogin Successful.\r\n";
+                    send(telnet.client_fd, format, strlen(format), 0);
+                }
+            }
+        }
+        break;
+
+        default:
+        break;
+    }
+}
+#endif
 
 /* telnet server thread entry */
 static void telnet_thread(void* parameter)
@@ -200,6 +312,7 @@ _telnet_start:
                 telnet.client_timeout = PKG_AGILE_TELNET_CLIENT_DEFAULT_TIMEOUT;
                 client_tick_timeout = rt_tick_get() + rt_tick_from_millisecond(telnet.client_timeout * 60000);
 
+            #ifndef PKG_AGILE_TELNET_USING_AUTH
                 rt_base_t level = rt_hw_interrupt_disable();
                 rt_ringbuffer_reset(telnet.tx_rb);
                 rt_hw_interrupt_enable(level);
@@ -208,6 +321,14 @@ _telnet_start:
 
                 const char *format = "Login Successful.\r\n";
                 send(telnet.client_fd, format, strlen(format), 0);
+            #else
+                telnet.state = AGILE_TELNET_STATE_USER;
+                rt_memset(telnet.username, 0, sizeof(telnet.username));
+                rt_memset(telnet.password, 0, sizeof(telnet.password));
+
+                const char *format = "\r\nusername:";
+                send(telnet.client_fd, format, strlen(format), 0);
+            #endif
 
                 continue;
             }
@@ -232,11 +353,19 @@ _telnet_start:
                     }
                     else
                     {
-                        rt_base_t level = rt_hw_interrupt_disable();
-                        rt_ringbuffer_put(telnet.rx_rb, recv_buf, recv_len);
-                        rt_hw_interrupt_enable(level);
+                    #ifdef PKG_AGILE_TELNET_USING_AUTH
+                        telnet_client_process(recv_buf, recv_len);
+                        if(telnet.state == AGILE_TELNET_STATE_PROCESS)
+                        {
+                    #endif
+                            rt_base_t level = rt_hw_interrupt_disable();
+                            rt_ringbuffer_put(telnet.rx_rb, recv_buf, recv_len);
+                            rt_hw_interrupt_enable(level);
 
-                        agile_console_wakeup();
+                            agile_console_wakeup();
+                    #ifdef PKG_AGILE_TELNET_USING_AUTH
+                        }
+                    #endif
 
                         client_tick_timeout = rt_tick_get() + rt_tick_from_millisecond(telnet.client_timeout * 60000);
                     }
