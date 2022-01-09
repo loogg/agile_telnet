@@ -1,23 +1,23 @@
 #ifndef __PKG_AGILE_TELNET_H
 #define __PKG_AGILE_TELNET_H
-#include <rtthread.h>
-#include <rtdevice.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#ifdef PKG_AGILE_TELNET_USING_AUTH 
-enum agile_telnet_state
-{
+#include <rtthread.h>
+#include <rtdevice.h>
+#include <stdint.h>
+
+#ifdef PKG_AGILE_TELNET_USING_AUTH
+enum agile_telnet_state {
     AGILE_TELNET_STATE_USER = 0,
     AGILE_TELNET_STATE_PASSWORD,
     AGILE_TELNET_STATE_PROCESS
 };
 #endif
 
-struct agile_telnet
-{
+struct agile_telnet {
     uint8_t isconnected;
     int server_fd;
     int client_fd;

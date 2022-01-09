@@ -29,6 +29,10 @@
 
 #ifdef PKG_USING_AGILE_TELNET
 
+#if (RT_VER_NUM < 0x40003) || (RT_VER_NUM == 0x40004)
+#error "Not support."
+#endif
+
 #ifndef PKG_USING_AGILE_CONSOLE
 #error "Please enable agile_console package"
 #endif
@@ -37,49 +41,52 @@
 #include <agile_console.h>
 
 #include <dfs_posix.h>
+#if RT_VER_NUM < 0x40100
 #include <dfs_poll.h>
+#else
+#include <poll.h>
+#endif
 #include <sys/time.h>
 #include <sys/socket.h>
 #include <sys/select.h>
 
-
 /* 线程堆栈大小 */
 #ifndef PKG_AGILE_TELNET_THREAD_STACK_SIZE
-#define PKG_AGILE_TELNET_THREAD_STACK_SIZE          2048
+#define PKG_AGILE_TELNET_THREAD_STACK_SIZE 2048
 #endif
 
 /* 线程优先级 */
 #ifndef PKG_AGILE_TELNET_THREAD_PRIORITY
-#define PKG_AGILE_TELNET_THREAD_PRIORITY            RT_THREAD_PRIORITY_MAX - 6
+#define PKG_AGILE_TELNET_THREAD_PRIORITY RT_THREAD_PRIORITY_MAX - 6
 #endif
 
 /* 监听端口 */
 #ifndef PKG_AGILE_TELNET_PORT
-#define PKG_AGILE_TELNET_PORT                       23
+#define PKG_AGILE_TELNET_PORT 23
 #endif
 
 /* 接收缓冲区大小 */
 #ifndef PKG_AGILE_TELNET_RX_BUFFER_SIZE
-#define PKG_AGILE_TELNET_RX_BUFFER_SIZE             256
+#define PKG_AGILE_TELNET_RX_BUFFER_SIZE 256
 #endif
 
 /* 发送缓冲区大小 */
 #ifndef PKG_AGILE_TELNET_TX_BUFFER_SIZE
-#define PKG_AGILE_TELNET_TX_BUFFER_SIZE             2048
+#define PKG_AGILE_TELNET_TX_BUFFER_SIZE 2048
 #endif
 
 /* 客户端空闲超时时间(单位：min) */
 #ifndef PKG_AGILE_TELNET_CLIENT_DEFAULT_TIMEOUT
-#define PKG_AGILE_TELNET_CLIENT_DEFAULT_TIMEOUT     3
+#define PKG_AGILE_TELNET_CLIENT_DEFAULT_TIMEOUT 3
 #endif
 
 /* 登录验证 */
 #ifdef PKG_AGILE_TELNET_USING_AUTH
 #ifndef PKG_AGILE_TELNET_USERNAME
-#define PKG_AGILE_TELNET_USERNAME                   "loogg"
+#define PKG_AGILE_TELNET_USERNAME "loogg"
 #endif
 #ifndef PKG_AGILE_TELNET_PASSWORD
-#define PKG_AGILE_TELNET_PASSWORD                   "loogg"
+#define PKG_AGILE_TELNET_PASSWORD "loogg"
 #endif
 #endif
 
@@ -101,8 +108,7 @@ RT_WEAK rt_size_t rt_ringbuffer_peak(struct rt_ringbuffer *rb, rt_uint8_t **ptr)
 
     *ptr = &rb->buffer_ptr[rb->read_index];
 
-    if(rb->buffer_size - rb->read_index > size)
-    {
+    if (rb->buffer_size - rb->read_index > size) {
         rb->read_index += size;
         return size;
     }
@@ -121,99 +127,84 @@ static void telnet_client_process(rt_uint8_t *recv_buf, int recv_len)
 {
     static rt_uint16_t index = 0;
 
-    switch(telnet.state)
-    {
-        case AGILE_TELNET_STATE_USER:
-        {
-            if(telnet.username[0] == '\0')
-                index = 0;
+    switch (telnet.state) {
+    case AGILE_TELNET_STATE_USER: {
+        if (telnet.username[0] == '\0')
+            index = 0;
 
-            rt_uint8_t change = 0;
-            for (int i = 0; i < recv_len; i++)
-            {
-                if(recv_buf[i] == '\r')
-                {
-                    change = 1;
-                    break;
-                }
-
-                if(index == sizeof(telnet.username) - 1)
-                    break;
-                telnet.username[index++] = recv_buf[i];
+        rt_uint8_t change = 0;
+        for (int i = 0; i < recv_len; i++) {
+            if (recv_buf[i] == '\r') {
+                change = 1;
+                break;
             }
 
-            if(change)
-            {
-                index = 0;
-                telnet.state = AGILE_TELNET_STATE_PASSWORD;
-                const char *format = "\r\npassword:";
+            if (index == sizeof(telnet.username) - 1)
+                break;
+            telnet.username[index++] = recv_buf[i];
+        }
+
+        if (change) {
+            index = 0;
+            telnet.state = AGILE_TELNET_STATE_PASSWORD;
+            const char *format = "\r\npassword:";
+            send(telnet.client_fd, format, strlen(format), 0);
+        }
+    } break;
+
+    case AGILE_TELNET_STATE_PASSWORD: {
+        rt_uint8_t change = 0;
+        for (int i = 0; i < recv_len; i++) {
+            if (recv_buf[i] == '\r') {
+                change = 1;
+                break;
+            }
+
+            if (index == sizeof(telnet.password) - 1)
+                break;
+            telnet.password[index++] = recv_buf[i];
+        }
+
+        if (change) {
+            int result = -RT_ERROR;
+            do {
+                if (rt_strcmp(telnet.username, PKG_AGILE_TELNET_USERNAME))
+                    break;
+                if (rt_strcmp(telnet.password, PKG_AGILE_TELNET_PASSWORD))
+                    break;
+
+                result = RT_EOK;
+            } while (0);
+
+            if (result != RT_EOK) {
+                telnet.state = AGILE_TELNET_STATE_USER;
+                rt_memset(telnet.username, 0, sizeof(telnet.username));
+                rt_memset(telnet.password, 0, sizeof(telnet.password));
+
+                const char *format = "\r\nAuth failed!\r\n\r\nusername:";
+                send(telnet.client_fd, format, strlen(format), 0);
+            } else {
+                telnet.state = AGILE_TELNET_STATE_PROCESS;
+                rt_base_t level = rt_hw_interrupt_disable();
+                rt_ringbuffer_reset(telnet.tx_rb);
+                rt_hw_interrupt_enable(level);
+
+                telnet.isconnected = 1;
+
+                const char *format = "\r\nLogin Successful.\r\n";
                 send(telnet.client_fd, format, strlen(format), 0);
             }
         }
-        break;
+    } break;
 
-        case AGILE_TELNET_STATE_PASSWORD:
-        {
-            rt_uint8_t change = 0;
-            for (int i = 0; i < recv_len; i++)
-            {
-                if(recv_buf[i] == '\r')
-                {
-                    change = 1;
-                    break;
-                }
-
-                if(index == sizeof(telnet.password) - 1)
-                    break;
-                telnet.password[index++] = recv_buf[i];
-            }
-
-            if(change)
-            {
-                int result = -RT_ERROR;
-                do
-                {
-                    if(rt_strcmp(telnet.username, PKG_AGILE_TELNET_USERNAME))
-                        break;
-                    if(rt_strcmp(telnet.password, PKG_AGILE_TELNET_PASSWORD))
-                        break;
-
-                    result = RT_EOK;
-                }while(0);
-
-                if(result != RT_EOK)
-                {
-                    telnet.state = AGILE_TELNET_STATE_USER;
-                    rt_memset(telnet.username, 0, sizeof(telnet.username));
-                    rt_memset(telnet.password, 0, sizeof(telnet.password));
-
-                    const char *format = "\r\nAuth failed!\r\n\r\nusername:";
-                    send(telnet.client_fd, format, strlen(format), 0);
-                }
-                else
-                {
-                    telnet.state = AGILE_TELNET_STATE_PROCESS;
-                    rt_base_t level = rt_hw_interrupt_disable();
-                    rt_ringbuffer_reset(telnet.tx_rb);
-                    rt_hw_interrupt_enable(level);
-
-                    telnet.isconnected = 1;
-
-                    const char *format = "\r\nLogin Successful.\r\n";
-                    send(telnet.client_fd, format, strlen(format), 0);
-                }
-            }
-        }
-        break;
-
-        default:
+    default:
         break;
     }
 }
 #endif
 
 /* telnet server thread entry */
-static void telnet_thread(void* parameter)
+static void telnet_thread(void *parameter)
 {
 #define RECV_BUF_LEN 64
 
@@ -233,28 +224,27 @@ static void telnet_thread(void* parameter)
     rt_thread_mdelay(5000);
 _telnet_start:
     telnet.server_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if(telnet.server_fd < 0)
+    if (telnet.server_fd < 0)
         goto _telnet_restart;
 
-    if(setsockopt(telnet.server_fd, SOL_SOCKET, SO_REUSEADDR, (const void *)&enable, sizeof(enable)) < 0)
+    if (setsockopt(telnet.server_fd, SOL_SOCKET, SO_REUSEADDR, (const void *)&enable, sizeof(enable)) < 0)
         goto _telnet_restart;
 
     rt_memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_port = htons(PKG_AGILE_TELNET_PORT);
     addr.sin_addr.s_addr = INADDR_ANY;
-    if(bind(telnet.server_fd, (struct sockaddr *) &addr, sizeof(addr)) < 0)
+    if (bind(telnet.server_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0)
         goto _telnet_restart;
 
-    if(listen(telnet.server_fd, 1) < 0)
+    if (listen(telnet.server_fd, 1) < 0)
         goto _telnet_restart;
-    
+
     flags = fcntl(telnet.server_fd, F_GETFL, 0);
     flags |= O_NONBLOCK;
     fcntl(telnet.server_fd, F_SETFL, flags);
 
-    while (1)
-    {
+    while (1) {
         FD_ZERO(&readset);
         FD_ZERO(&exceptset);
 
@@ -262,40 +252,35 @@ _telnet_start:
         FD_SET(telnet.server_fd, &exceptset);
 
         int max_fd = telnet.server_fd;
-        if(telnet.client_fd >= 0)
-        {
+        if (telnet.client_fd >= 0) {
             FD_SET(telnet.client_fd, &readset);
             FD_SET(telnet.client_fd, &exceptset);
-           
-            if(max_fd < telnet.client_fd)
+
+            if (max_fd < telnet.client_fd)
                 max_fd = telnet.client_fd;
         }
-        if(telnet.isconnected)
-        {
-             FD_SET(telnet.tx_fd, &readset);
+        if (telnet.isconnected) {
+            FD_SET(telnet.tx_fd, &readset);
 
-             if(max_fd < telnet.tx_fd)
+            if (max_fd < telnet.tx_fd)
                 max_fd = telnet.tx_fd;
         }
 
         int rc = select(max_fd + 1, &readset, RT_NULL, &exceptset, &select_timeout);
-        if(rc < 0)
+        if (rc < 0)
             break;
-        if(rc > 0)
-        {
+        if (rc > 0) {
             //服务器事件
-            if(FD_ISSET(telnet.server_fd, &exceptset))
+            if (FD_ISSET(telnet.server_fd, &exceptset))
                 break;
 
-            if(FD_ISSET(telnet.server_fd, &readset))
-            {
+            if (FD_ISSET(telnet.server_fd, &readset)) {
                 socklen_t addrlen = sizeof(struct sockaddr_in);
                 int new_s = accept(telnet.server_fd, (struct sockaddr *)&addr, &addrlen);
-                if(new_s < 0)
+                if (new_s < 0)
                     break;
 
-                if (telnet.client_fd >= 0)
-                {
+                if (telnet.client_fd >= 0) {
                     telnet.isconnected = 0;
                     close(telnet.client_fd);
                     telnet.client_fd = -1;
@@ -312,7 +297,7 @@ _telnet_start:
                 telnet.client_timeout = PKG_AGILE_TELNET_CLIENT_DEFAULT_TIMEOUT;
                 client_tick_timeout = rt_tick_get() + rt_tick_from_millisecond(telnet.client_timeout * 60000);
 
-            #ifndef PKG_AGILE_TELNET_USING_AUTH
+#ifndef PKG_AGILE_TELNET_USING_AUTH
                 rt_base_t level = rt_hw_interrupt_disable();
                 rt_ringbuffer_reset(telnet.tx_rb);
                 rt_hw_interrupt_enable(level);
@@ -321,76 +306,64 @@ _telnet_start:
 
                 const char *format = "Login Successful.\r\n";
                 send(telnet.client_fd, format, strlen(format), 0);
-            #else
+#else
                 telnet.state = AGILE_TELNET_STATE_USER;
                 rt_memset(telnet.username, 0, sizeof(telnet.username));
                 rt_memset(telnet.password, 0, sizeof(telnet.password));
 
                 const char *format = "\r\nusername:";
                 send(telnet.client_fd, format, strlen(format), 0);
-            #endif
+#endif
 
                 continue;
             }
 
             // 客户端事件
-            if(telnet.client_fd >= 0)
-            {
-                if(FD_ISSET(telnet.client_fd, &exceptset))
-                {
+            if (telnet.client_fd >= 0) {
+                if (FD_ISSET(telnet.client_fd, &exceptset)) {
                     telnet.isconnected = 0;
                     close(telnet.client_fd);
                     telnet.client_fd = -1;
-                }
-                else if(FD_ISSET(telnet.client_fd, &readset))
-                {
+                } else if (FD_ISSET(telnet.client_fd, &readset)) {
                     int recv_len = recv(telnet.client_fd, recv_buf, RECV_BUF_LEN, MSG_DONTWAIT);
-                    if(recv_len <= 0)
-                    {
+                    if (recv_len <= 0) {
                         telnet.isconnected = 0;
                         close(telnet.client_fd);
                         telnet.client_fd = -1;
-                    }
-                    else
-                    {
-                    #ifdef PKG_AGILE_TELNET_USING_AUTH
+                    } else {
+#ifdef PKG_AGILE_TELNET_USING_AUTH
                         telnet_client_process(recv_buf, recv_len);
-                        if(telnet.state == AGILE_TELNET_STATE_PROCESS)
-                        {
-                    #endif
+                        if (telnet.state == AGILE_TELNET_STATE_PROCESS) {
+#endif
                             rt_base_t level = rt_hw_interrupt_disable();
                             rt_ringbuffer_put(telnet.rx_rb, recv_buf, recv_len);
                             rt_hw_interrupt_enable(level);
 
                             agile_console_wakeup();
-                    #ifdef PKG_AGILE_TELNET_USING_AUTH
+#ifdef PKG_AGILE_TELNET_USING_AUTH
                         }
-                    #endif
+#endif
 
                         client_tick_timeout = rt_tick_get() + rt_tick_from_millisecond(telnet.client_timeout * 60000);
                     }
                 }
             }
 
-            if(telnet.isconnected && FD_ISSET(telnet.tx_fd, &readset))
-            {
+            if (telnet.isconnected && FD_ISSET(telnet.tx_fd, &readset)) {
                 rt_uint8_t *send_ptr = RT_NULL;
                 rt_base_t level = rt_hw_interrupt_disable();
                 int send_len = rt_ringbuffer_peak(telnet.tx_rb, &send_ptr);
                 rt_hw_interrupt_enable(level);
 
-                if(send_len > 0)
-                {
+                if (send_len > 0) {
                     send(telnet.client_fd, send_ptr, send_len, 0);
                     client_tick_timeout = rt_tick_get() + rt_tick_from_millisecond(telnet.client_timeout * 60000);
                 }
             }
         }
 
-        if(telnet.client_fd >= 0)
-        {
-            if((rt_tick_get() - client_tick_timeout) < (RT_TICK_MAX / 2))
-            {
+        if (telnet.client_fd >= 0) {
+            if ((rt_tick_get() - client_tick_timeout) < (RT_TICK_MAX / 2)) {
                 telnet.isconnected = 0;
                 close(telnet.client_fd);
                 telnet.client_fd = -1;
@@ -400,13 +373,11 @@ _telnet_start:
 
 _telnet_restart:
     telnet.isconnected = 0;
-    if(telnet.server_fd >= 0)
-    {
+    if (telnet.server_fd >= 0) {
         close(telnet.server_fd);
         telnet.server_fd = -1;
     }
-    if(telnet.client_fd >= 0)
-    {
+    if (telnet.client_fd >= 0) {
         close(telnet.client_fd);
         telnet.client_fd = -1;
     }
@@ -415,22 +386,41 @@ _telnet_restart:
     goto _telnet_start;
 }
 
-static void telnet_backend_output(const uint8_t *buf, int len)
+static void telnet_backend_output(rt_device_t dev, const uint8_t *buf, int len)
 {
-    if(telnet.isconnected == 0)
+    if (telnet.isconnected == 0)
         return;
 
+    int put_len = 0;
+
     rt_base_t level = rt_hw_interrupt_disable();
-    int put_len = rt_ringbuffer_put(telnet.tx_rb, buf, len);
+
+    if (dev->open_flag & RT_DEVICE_FLAG_STREAM) {
+        while (len > 0) {
+            if (*buf == '\n') {
+                if (rt_ringbuffer_putchar(telnet.tx_rb, '\r') == 0)
+                    break;
+            }
+
+            if (rt_ringbuffer_putchar(telnet.tx_rb, *buf) == 0)
+                break;
+
+            put_len++;
+            ++buf;
+            --len;
+        }
+    } else
+        put_len = rt_ringbuffer_put(telnet.tx_rb, buf, len);
+
     rt_hw_interrupt_enable(level);
 
-    if(put_len > 0)
-        rt_wqueue_wakeup(&(telnet.tlnt_dev->wait_queue), (void*)POLLIN);
+    if (put_len > 0)
+        rt_wqueue_wakeup(&(telnet.tlnt_dev->wait_queue), (void *)POLLIN);
 }
 
-static int telnet_backend_read(uint8_t *buf, int len)
+static int telnet_backend_read(rt_device_t dev, uint8_t *buf, int len)
 {
-    if(telnet.isconnected == 0)
+    if (telnet.isconnected == 0)
         return 0;
 
     rt_size_t result = 0;
@@ -460,23 +450,23 @@ static int tlnt_fops_poll(struct dfs_fd *fd, rt_pollreq_t *req)
 
     rt_poll_add(&(device->wait_queue), req);
 
-    if(rt_ringbuffer_data_len(telnet.tx_rb) != 0)
+    if (rt_ringbuffer_data_len(telnet.tx_rb) != 0)
         mask |= POLLIN;
-    
+
     return mask;
 }
 
 static const struct dfs_file_ops tlnt_fops =
-{
-    tlnt_fops_open,
-    RT_NULL,
-    RT_NULL,
-    RT_NULL,
-    RT_NULL,
-    RT_NULL,
-    RT_NULL,
-    RT_NULL,
-    tlnt_fops_poll,
+    {
+        tlnt_fops_open,
+        RT_NULL,
+        RT_NULL,
+        RT_NULL,
+        RT_NULL,
+        RT_NULL,
+        RT_NULL,
+        RT_NULL,
+        tlnt_fops_poll,
 };
 
 static int agile_telnet_init(void)
@@ -502,7 +492,7 @@ static int agile_telnet_init(void)
     telnet.tx_fd = open("/dev/tlnt", O_RDWR, 0);
     RT_ASSERT(telnet.tx_fd >= 0);
 
-    rt_thread_t tid = rt_thread_create("telnet", telnet_thread, RT_NULL, PKG_AGILE_TELNET_THREAD_STACK_SIZE, 
+    rt_thread_t tid = rt_thread_create("telnet", telnet_thread, RT_NULL, PKG_AGILE_TELNET_THREAD_STACK_SIZE,
                                        PKG_AGILE_TELNET_THREAD_PRIORITY, 100);
     RT_ASSERT(tid != RT_NULL);
     rt_thread_startup(tid);
@@ -520,30 +510,22 @@ INIT_ENV_EXPORT(agile_telnet_init);
 #ifdef FINSH_USING_MSH
 static int telnet_client_timeout(int argc, char **argv)
 {
-    if(argc == 1)
-    {
+    if (argc == 1) {
         rt_kprintf("telnet client timeout:%d min\r\n", telnet.client_timeout);
-    }
-    else if(argc == 2)
-    {
+    } else if (argc == 2) {
         int timeout = atoi(argv[1]);
-        if(timeout <= 0)
-        {
+        if (timeout <= 0) {
             rt_kprintf("telnet client timeout must be greater than 0.");
-        }
-        else
-        {
+        } else {
             telnet.client_timeout = timeout;
             rt_kprintf("set telnet client timeout success.\r\n");
         }
-    }
-    else
-    {
+    } else {
         rt_kprintf("Usage:\r\n");
         rt_kprintf("telnet_client_timeout           - get telnet client timeout\r\n");
         rt_kprintf("telnet_client_timeout timeout   - set telnet client timeout\r\n");
     }
-  
+
     return RT_EOK;
 }
 MSH_CMD_EXPORT_ALIAS(telnet_client_timeout, telnet_ctm, telnet client timeout);
