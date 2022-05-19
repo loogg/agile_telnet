@@ -23,6 +23,11 @@
     Author:       Longwei Ma
     Modification: 使用 agile_console_wakeup
                   增加登录验证用户功能
+
+ 5. Version:      v2.0.3
+    Date:         2022-01-09
+    Author:       Longwei Ma
+    Modification: 兼容 RT-Thread 4.1.0
 *************************************************/
 
 #include <rthw.h>
