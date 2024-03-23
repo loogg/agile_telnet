@@ -459,15 +459,8 @@ static int tlnt_fops_poll(struct dfs_fd *fd, struct rt_pollreq *req)
 
 static const struct dfs_file_ops tlnt_fops =
     {
-        tlnt_fops_open,
-        RT_NULL,
-        RT_NULL,
-        RT_NULL,
-        RT_NULL,
-        RT_NULL,
-        RT_NULL,
-        RT_NULL,
-        tlnt_fops_poll,
+        .open = tlnt_fops_open,
+        .poll = tlnt_fops_poll,
 };
 
 static int agile_telnet_init(void)
