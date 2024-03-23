@@ -2,32 +2,6 @@
  All rights reserved.
  File name:     agile_telnet.c
  Description:   agile_telnet源码
- History:
- 1. Version:      v1.0.0
-    Date:         2020-02-27
-    Author:       Longwei Ma
-    Modification: 新建版本
-
- 2. Version:      v2.0.0
-    Date:         2020-08-02
-    Author:       Longwei Ma
-    Modification: 将agile_telnet作为agile_console的一个插件
-
- 3. Version:      v2.0.1
-    Date:         2021-04-07
-    Author:       Longwei Ma
-    Modification: 将telnet的tx_rb做成devfs，使用select监听是否有数据
-
- 4. Version:      v2.0.2
-    Date:         2021-04-10
-    Author:       Longwei Ma
-    Modification: 使用 agile_console_wakeup
-                  增加登录验证用户功能
-
- 5. Version:      v2.0.3
-    Date:         2022-01-09
-    Author:       Longwei Ma
-    Modification: 兼容 RT-Thread 4.1.0
 *************************************************/
 
 #include <rthw.h>
@@ -100,7 +74,11 @@
 static struct agile_telnet telnet = {0};
 static struct agile_console_backend telnet_backend = {0};
 
+#if RT_VER_NUM >= 0x50000
+rt_weak rt_size_t rt_ringbuffer_peak(struct rt_ringbuffer *rb, rt_uint8_t **ptr)
+#else
 RT_WEAK rt_size_t rt_ringbuffer_peak(struct rt_ringbuffer *rb, rt_uint8_t **ptr)
+#endif
 {
     RT_ASSERT(rb != RT_NULL);
 
@@ -439,9 +417,17 @@ static int telnet_backend_read(rt_device_t dev, uint8_t *buf, int len)
     return result;
 }
 
+#if RT_VER_NUM >= 0x50001
+static int tlnt_fops_open(struct dfs_file *fd)
+#else
 static int tlnt_fops_open(struct dfs_fd *fd)
+#endif
 {
+#if RT_VER_NUM >= 0x50000
+    rt_device_t device = (rt_device_t)fd->vnode->data;
+#else
     rt_device_t device = (rt_device_t)fd->data;
+#endif
     RT_ASSERT(device != RT_NULL);
 
     device->ref_count++;
@@ -449,10 +435,18 @@ static int tlnt_fops_open(struct dfs_fd *fd)
     return 0;
 }
 
-static int tlnt_fops_poll(struct dfs_fd *fd, rt_pollreq_t *req)
+#if RT_VER_NUM >= 0x50001
+static int tlnt_fops_poll(struct dfs_file *fd, struct rt_pollreq *req)
+#else
+static int tlnt_fops_poll(struct dfs_fd *fd, struct rt_pollreq *req)
+#endif
 {
     int mask = 0;
+#if RT_VER_NUM >= 0x50000
+    rt_device_t device = (rt_device_t)fd->vnode->data;
+#else
     rt_device_t device = (rt_device_t)fd->data;
+#endif
     RT_ASSERT(device != RT_NULL);
 
     rt_poll_add(&(device->wait_queue), req);
